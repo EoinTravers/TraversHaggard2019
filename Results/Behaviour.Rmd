@@ -1,0 +1,484 @@
+---
+title: "R Notebook"
+output: 
+  html_document: 
+    keep_md: yes
+    self_contained: no
+    dev: 'svg'
+    code_folding: hide
+---
+
+```{r results='hide', warning=F, message=F}
+library(tidyverse)
+library(magrittr)
+library(lme4)
+library(broom)
+library(eoinR)
+library(bmsR)
+# source('../HelperFunctions.R')
+select = dplyr::select
+theme_set(cowplot::theme_cowplot(font_size = 20))
+data = read.csv('data/all_trial_metadata.csv')
+z = function(x){ scale(x, center=T, scale=T) %>% c}
+
+data = mutate(data,
+              outcome = 1 - is.na(outcome),
+              bet = ifelse(condition==0, action, 1-action),
+              prob = p_win,
+              win = v_win,
+              c.prob = prob - .5,
+              c.win = win - 10,
+              z.prob = z(prob),
+              z.win = z(win),
+              ev = win * prob - 10*(1-prob),
+              f.condition = factor(condition),
+              f.bet = factor(bet),
+              act = rt > -1,
+              rt = ifelse(act, rt, NA),
+              change = 1*(bet!=lag(bet, 1)),
+              change.phase = c(0, cumsum(change[2:length(change)])),
+              action.type=interaction(visible, difficult) %>% fct_recode(Guess='0.False', Easy='1.False', Difficult='1.True') %>% droplevels(),
+              action.type = fct_relevel(action.type, "Easy", "Difficult", "Guess"),
+              action.type.r = fct_relevel(action.type, "Guess", "Difficult", "Easy"))
+levels(data$f.condition) = list('Act-to-bet'=0, 'Act-to-pass'=1)
+levels(data$f.bet) = list('Bet'=1, 'Pass'=0)
+data %<>% data.frame()
+lgnd = function(x,y) theme(legend.position = c(x,y), legend.justification = c(x, y))
+
+choices = filter(data, visible==1)
+guesses = filter(data, visible==0)
+
+colours = c('darkgreen', 'red', 'black')
+order = c('Easy', 'Difficult', 'Guess')
+
+str(data)
+```
+
+
+# Standard (non-guess) trials
+
+```{r fig.width=6.25, fig.height=5} 
+choices %>%
+  group_by(win, prob) %>%
+  summarise(bet=mean(bet)) %>%
+  ggplot(aes(win, prob, fill=bet)) +
+  geom_tile() +
+  scale_fill_gradient2(low='blue', mid='yellow', high='red', midpoint=.5) +
+  geom_text(aes(label=round(bet, 2))) +
+  labs(x='Value(Win)', y='P(Win)', fill='P(Bet)') +
+  scale_x_continuous(breaks = seq(2, 18, 2)) +
+  scale_y_continuous(breaks = seq(.2, .8, .1)) +
+  theme_bw(base_size = 20)
+ggsave('figures/responses.svg', width=6.25, height=5)
+```
+
+```{r fig.width=10, fig.height=5} 
+choices %>%
+  group_by(f.condition, win, prob) %>%
+  summarise(bet=mean(bet)) %>%
+  ggplot(aes(win, prob, fill=bet)) +
+  facet_wrap(~f.condition) +
+  geom_tile() +
+  scale_fill_gradient2(low='blue', mid='yellow', high='red', midpoint=.5) +
+  geom_text(aes(label=round(bet, 2))) +
+  labs(x='Value(Win)', y='P(Win)', fill='P(Bet)') +
+  scale_x_continuous(breaks = seq(2, 18, 2)) +
+  scale_y_continuous(breaks = seq(.2, .8, .1)) +
+  theme_bw(base_size = 20)
+ggsave('figures/condition_responses.svg', width=10, height=5)
+```
+
+```{r fig.width=6.25, fig.height=5} 
+# choices %>% 
+#   filter(participant %in% c(1001, 1002, 1003, 1004)) %>%
+#   group_by(participant, win, prob) %>%
+#   summarise(bet=mean(bet)) %>%
+#   ggplot(aes(win, prob, fill=bet)) +
+#   facet_wrap(~participant, nrow=2) +
+#   geom_tile() +
+#   scale_fill_gradient2(low='blue', mid='yellow', high='red', midpoint=.5) +
+#   # geom_text(aes(label=round(bet, 2))) +
+#   labs(x='Value(Win)', y='P(Win)', fill='P(Bet)') +
+#   scale_x_continuous(breaks = seq(2, 18, 2)) +
+#   scale_y_continuous(breaks = seq(.2, .8, .1)) +
+#   theme_bw(base_size = 20)
+```
+
+```{r fig.width=7, fig.height=5} 
+choices %>%
+  group_by(participant, win, prob) %>%
+  summarise(bet=mean(bet)) %>%
+  ggplot(aes(win, prob, fill=bet)) +
+  facet_wrap(~participant, nrow=5) +
+  geom_tile() +
+  scale_fill_gradient2(low='blue', mid='yellow', high='red', midpoint=.5) +
+  # geom_text(aes(label=round(bet, 2))) +
+  labs(x='Value(Win)', y='P(Win)', fill='P(Bet)') +
+  scale_x_continuous(breaks = seq(2, 18, 8)) +
+  scale_y_continuous(breaks = seq(.2, .8, .3)) +
+  theme_bw(base_size = 20) +
+  theme(strip.background = element_blank(), strip.text.x = element_blank())
+ggsave('figures/subject_responses.svg', width=7, height=5)
+```
+
+
+The interaction model fits best overall.
+
+```{r}
+resp.model.ev              = glmer(bet ~ ev + (ev|participant),  data=choices, family = binomial)
+resp.model.ev.no.intercept = glmer(bet ~ -1 + ev + (-1 + ev|participant), data=choices, family = binomial)
+resp.model.additive        = glmer(bet ~ z.win + z.prob + (z.win + z.prob|participant),  data=choices, family = binomial)
+resp.model.interaction     = glmer(bet ~ z.win * z.prob + (z.win + z.prob|participant),  data=choices, family = binomial)
+
+anova(resp.model.ev, resp.model.ev.no.intercept, resp.model.additive, resp.model.interaction)
+```
+
+```{r}
+summary(resp.model.interaction)
+```
+
+```{r}
+verbalise_lmm(resp.model.interaction, digits=2, subject_id='participant')
+```
+
+Effect of condition?
+
+```{r}
+data %>% group_by(f.condition) %>% summarise(mean(bet))
+```
+
+To estimate the effect of condition, fit the interaction model as before,
+but with include a main effect of condition as well.
+
+```{r}
+resp.model.condition = glmer(bet ~ f.condition + z.win * z.prob + (z.win + z.prob|participant), 
+                                         data=choices, family = binomial)
+summary(resp.model.condition)
+verbalise_lmm(resp.model.condition, digits=2, subject_id='participant')
+```
+
+# Guesses
+
+```{r g.guess, fig.width=5, fig.height=4}
+mean.guesses = guesses %>%
+  group_by(participant) %>%
+  summarise(mean.bet = mean(bet),
+            sum.bet = sum(bet),
+            mean.act = mean(act),
+            n = n()) %>%
+  arrange(mean.bet)
+# mean.guesses
+ggplot(mean.guesses, aes(mean.bet, mean.act)) +
+  geom_point() + coord_cartesian(xlim=c(0,1), ylim=c(0,1))
+```
+
+```{r g.guess, fig.width=5, fig.height=4}
+guess.means = guesses %>%
+  group_by(participant) %>%
+  mutate(mean.bet = mean(bet)) %>%
+  ungroup() %>%
+  mutate(subj = factor(participant) %>% fct_reorder(mean.bet))
+
+guess.means %>%
+  ggplot(aes(subj, bet)) + stat_summary(size=.2) +
+  geom_hline(yintercept=.5, linetype='dashed') +
+  scale_x_discrete(labels=c()) +
+  labs(x='Participant', y='P(Bet)', title='Guesses')
+# ggsave()
+
+```
+
+
+```{r g.guess, fig.width=5, fig.height=4}
+guesses %>%
+  group_by(participant) %>%
+  mutate(act = 1*act,
+         mean.act = mean(act)) %>%
+  ungroup() %>%
+  mutate(subj = factor(participant) %>% fct_reorder(mean.act)) %>%
+  ggplot(aes(subj, act)) + stat_summary(size=.2) +
+  geom_hline(yintercept=.5, linetype='dashed') +
+  scale_x_discrete(labels=c()) +
+  scale_y_continuous(limits=c(0,1)) +
+  labs(x='Participant', y='P(Act)', title='Guesses')
+```
+
+
+
+## Subject-specific models
+
+### Visualise individual models
+
+```{r}
+plot.data = data %>%
+  mutate_at(vars(c.prob, c.win, ev), list(function(x) (2*x) / sd(x))) %>%
+  group_by(c.prob, c.win, ev) %>% 
+  summarise(n=n()) %>%
+  mutate(
+    m0 = .5,
+    m.ev = invlogit(ev),
+    m.win = invlogit(c.win),
+    m.prob = invlogit(c.prob),
+    m.win.prob = invlogit(c.prob + c.win),
+    m.win.probX = invlogit(c.prob + c.win + .2*c.prob*c.win))
+plot.data %>%
+  gather(model, y, m0:m.win.probX) %>%
+  ggplot(aes(c.win, c.prob, fill=y)) +
+  facet_wrap(~model) +
+  geom_tile() +
+  scale_fill_gradient2(low='blue', mid='yellow', high='red', midpoint=.5) +
+  labs(x='Value(Win)', y='P(Win)', fill='P(Bet)') +
+  scale_x_continuous(breaks = seq(2, 18, 8)) +
+  scale_y_continuous(breaks = seq(.2, .8, .3)) +
+  theme_bw(base_size = 20)
+```
+
+
+```{r fig.width=12, fig.height=5}
+subject.model.comparison = data %>%
+  nest(-f.condition, -participant) %>%
+  mutate(m = map(data, function(d){
+# Fit all possible models
+    m.0          = glm(bet ~ 1                             , data = d, family=binomial)
+    m.ev         = glm(bet ~ ev                            , data = d, family=binomial)
+    m.win        = glm(bet ~ c.win                         , data = d, family=binomial)
+    m.prob       = glm(bet ~ c.prob                        , data = d, family=binomial)
+    m.win.prob   = glm(bet ~ c.win + c.prob                , data = d, family=binomial)
+    m.win.probX  = glm(bet ~ c.win + c.prob + c.win:c.prob , data = d, family=binomial)
+    comp = eoinR::compare.models(m.0, m.ev, m.win, m.prob, 
+                                 m.win.prob, m.win.probX) %>% select(model, AIC.prob, BIC.prob)
+    return(comp)
+  })) %>%
+  unnest(m)
+subject.model.comparison$participant %<>% factor()
+levels(subject.model.comparison$participant) = 1:length(subject.model.comparison$participant)
+subject.model.comparison$model %<>% factor
+levels(subject.model.comparison$model) = c('NullModel'='m.0', 'P(Win)'='m.prob', 'V(Win)'='m.win', 'EV'='m.ev',
+                                           '2xMain effects'='m.win.prob', '+Interaction'='m.win.probX')
+ggplot(subject.model.comparison, aes(participant, BIC.prob, fill=model)) +
+  scale_x_discrete(breaks=c(5, 10, 15, 20)) +
+   geom_bar(position = 'fill', stat='identity') +
+  facet_wrap(~f.condition) +
+  labs(x='Subject', y='P(Model | data)', fill='Model')
+```
+```{r fig.width=12, fig.height=5}
+subject.model.comparison = data %>%
+  nest(-participant) %>%
+  mutate(m = map(data, function(d){
+# Fit all possible models
+    m.0          = glm(bet ~ 1                             , data = d, family=binomial)
+    m.ev         = glm(bet ~ ev                            , data = d, family=binomial)
+    m.win        = glm(bet ~ c.win                         , data = d, family=binomial)
+    m.prob       = glm(bet ~ c.prob                        , data = d, family=binomial)
+    m.win.prob   = glm(bet ~ c.win + c.prob                , data = d, family=binomial)
+    m.win.probX  = glm(bet ~ c.win + c.prob + c.win:c.prob , data = d, family=binomial)
+    comp = eoinR::compare.models(m.0, m.ev, m.win, m.prob, 
+                                 m.win.prob, m.win.probX)# %>% select(model, AIC.prob, BIC.prob)
+    return(comp)
+  })) %>%
+  unnest(m)
+subject.model.comparison$participant %<>% factor()
+levels(subject.model.comparison$participant) = 1:length(subject.model.comparison$participant)
+subject.model.comparison$model %<>% factor
+levels(subject.model.comparison$model) = c('NullModel'='m.0', 'P(Win)'='m.prob', 'V(Win)'='m.win', 'EV'='m.ev',
+                                           '2xMain effects'='m.win.prob', '+Interaction'='m.win.probX')
+ggplot(subject.model.comparison, aes(participant, BIC.prob, fill=model)) +
+  scale_x_discrete(breaks=c(5, 10, 15, 20)) +
+   geom_bar(position = 'fill', stat='identity') +
+  labs(x='Subject', y='P(Model | data)', fill='Model')
+
+m = subject.model.comparison %>% 
+  mutate(lmp = -.5*BIC) %>%
+  select(model, participant, lmp) %>%
+  spread(participant, lmp) %>%
+  select(-model) %>%
+  as.matrix() %>%
+  t() # subjects x models
+
+## https://github.com/mattelisi/bmsR
+bmsR::VB_bms(m)
+
+f = function(x) x %>% log() %>% sum()
+group.model.comparison = subject.model.comparison %>%
+  group_by(model) %>%
+  summarise_at(vars(AIC.prob, BIC.prob), funs(f))
+group.model.comparison
+b = group.model.comparison$BIC.prob / 100
+b2 = exp(b - max(b))
+plot(b2 / sum(b2))
+
+```
+
+## Subject models
+
+```{r}
+## Only run this once!
+f.model = function(d){
+  glm(response ~ z.prob * z.win, data=d, family=binomial)
+}
+f.pred = function(d, m){
+  d$predict.bet = predict.glm(m, d, type='response')
+  d
+}
+subj.models = choices %>%
+  nest(-participant) %>%
+  mutate(models = map(data, f.model),
+         coef = map(models, tidy),
+         data = map2(data, models, f.pred))
+subj.beta = unnest(subj.models, coef)
+
+choices = unnest(subj.models, data)
+choices.pred = choices %>% select(participant, trial_nr, predict.bet)
+choices = inner_join(choices, choices.pred, by=c('participant', 'trial_nr'))
+```
+
+
+## Guess Trials
+
+```{r}
+guess = filter(data, visible==0)
+guess %>%
+  group_by(participant, f.condition) %>%
+  summarise(n())
+guess.by.sub = guess %>%
+  group_by(participant, f.condition) %>%
+  summarise(bet=mean(bet))
+guess.by.sub %>%
+  spread(f.condition, bet) %>%
+  ggplot(aes(`Act-to-bet`, `Act-to-pass`)) +
+  geom_point() +
+  coord_fixed() +
+  geom_abline(intercept=0, slope=1) +
+  labs(title='P(Bet | Guessing)')
+```
+
+```{r fig.width=3, fig.height=3}
+d = guess %>% group_by(participant) %>% summarise(bet=mean(bet)) 
+# ggplot(d, aes(bet)) + geom_histogram(bins=6)
+
+# ggplot(guess, aes(participant, bet)) + stat_summary()
+
+guess %>%
+  group_by(participant) %>%
+  mutate(mean.bet = mean(bet)) %>%
+  ungroup() %>%
+  mutate(subj = factor(participant) %>% fct_reorder(mean.bet)) %>%
+  ggplot(aes(subj, bet)) + stat_summary(size=.2) +
+  geom_hline(yintercept=.5, linetype='dashed') +
+  scale_x_discrete(labels=c()) +
+  labs(x='Participant', y='P(Bet|Guess)') +
+  theme_bw()
+```
+
+
+```{r}
+guess.by.sub %>%
+  group_by(f.condition) %>%
+  summarise(mean.sd(bet))
+t.test(bet ~ f.condition, data=guess.by.sub, paired=T) %>% verbalise_t_test()
+glmer(bet ~ f.condition + (f.condition|participant), data=guess, family=binomial) %>% summary()
+
+```
+
+
+--- 
+
+# Response Times
+
+```{r fig.height=3, fig.width=5}
+rt.dat = data %>%
+  filter(action==1) %>%
+  group_by(participant, action.type, action.type.r) %>%
+  summarise(rt=mean(rt),
+            log.rt=log(rt)) %>%
+  ungroup()
+g.rt1 = rt.dat %>%
+  ggplot(aes(action.type.r, rt, color=action.type)) +
+  stat_summary() +
+  coord_flip() +
+  labs(x='', y='Response time') +
+  theme(legend.position = 'none') +
+  scale_color_manual(values=colours)
+  # stat_summary(color='red', fun.data=mean_se, position = position_nudge(x=.1))# +
+  # geom_point(alpha=.2) + geom_path(aes(group=participant), alpha=.2)
+g.rt1
+```
+
+
+```{r}
+rt.dat %>%
+  group_by(action.type) %>%
+  summarise_at(vars(rt), funs(mean, sd)) %>%
+  mutate_if(is.numeric, round, digits=2)
+```
+
+```{r}
+library(afex)
+aov_ez(id='participant', dv='log.rt', within='action.type', data=rt.dat)
+rt.dat = mutate(rt.dat, action.type = as.character(action.type))
+
+t.test(log.rt ~ action.type, data=filter(rt.dat, action.type!='Easy'), paired=T) %>% 
+  verbalise_t_test() %>% paste('Difficulting vs guessing:', .)
+t.test(log.rt ~ action.type, data=filter(rt.dat, action.type!='Difficult'), paired=T) %>% 
+  verbalise_t_test() %>% paste('Choosing vs guessing:', .)
+t.test(log.rt ~ action.type, data=filter(rt.dat, action.type!='Guess'), paired=T) %>% 
+  verbalise_t_test() %>% paste('Difficulting vs choosing:', .)
+```
+
+
+```{r}
+g.rt2a = ggplot(data, aes(rt)) +
+  facet_grid(action.type~.) +
+  geom_histogram(aes(y=..count../sum(..count..)),
+                 fill='skyblue', color='white') +
+  scale_y_continuous(breaks=c()) +
+  labs(x='Response time', y='')
+g.rt2a
+```
+
+```{r}
+g.rt2b = ggplot(data, aes(rt, fill=action.type, color=action.type, group=action.type)) +
+  geom_density(alpha=.2) +
+  scale_y_continuous(breaks=c()) +
+  labs(x='Response time', y='', fill='Action', color='Action') +
+  scale_color_manual(values=colours) +
+  scale_fill_manual(values=colours) +
+  lgnd(1,1)
+g.rt2b
+```
+
+```{r fig.width=7, fig.height=4}
+library(cowplot)
+g1 = g.rt1 + scale_y_continuous(breaks=0:5, limits=c(0, 3))
+g2 = g.rt2b + scale_x_continuous(breaks=0:5, limits=c(0, 3))
+# plot_grid(g1, g2, ncol=1, align='v', rel_heights = c(1, 3))
+g = plot_grid(g2, g1, ncol=1, align='v', rel_heights = c(3, 1.6))
+ggsave('figures/rt-by-action.svg', g, width=7, height=4)
+g
+```
+
+
+```{r}
+ggplot(data, aes(rt)) +
+  facet_grid(f.condition~.) +
+  geom_histogram(aes(y=..count../sum(..count..)),
+                 fill='skyblue', color='white') +
+  scale_y_continuous(breaks=c()) +
+  labs(x='Response time', y='')
+```
+
+```{r}
+ggplot(data, aes(rt, fill=f.condition, color=f.condition, group=f.condition)) +
+  geom_density(alpha=.2) +
+  scale_y_continuous(breaks=c()) +
+  labs(x='Response time', y='', fill='Condition', color='Condition') +
+  lgnd(1,1)
+```
+
+
+```{r}
+ggplot(choices, aes(ev, rt)) +
+  geom_point(position = position_jitter(width=.1), alpha=.2) +
+  facet_wrap(~bet) +
+  stat_smooth(method='loess')
+```

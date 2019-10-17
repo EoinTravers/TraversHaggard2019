@@ -1,0 +1,273 @@
+---
+title: "Guess vs Difficult"
+author: "Eoin Travers"
+date: "11 February 2019"
+output: 
+  html_document:
+    code_folding: hide
+    dev: svglite
+    keep_md: yes
+    self_contained: no
+---
+
+```{r}
+library(tidyverse)
+library(cowplot)
+library(lme4)
+library(lmerTest)
+library(brms)
+library(mgcv)
+library(splines)
+library(car)
+library(magrittr)
+library(eoinR)
+source('src/functions.R')
+
+theme_set(theme_cowplot(font_size = 16) + theme(panel.grid = element_line()))
+```
+
+```{r load.and.preprocess}
+if(file.exists('data/erp_data')){
+  erp.data = read_csv('data/erp_data.csv')
+} else {
+  erp.data = load.erp.data()
+  write_csv(erp.data, 'data/erp_data.csv')
+}
+trials = read.csv('data/all_trial_metadata.csv')
+uncertain.trials = get.uncertain.trials(erp.data)
+uncertain.trials.modelled = filter(uncertain.trials, time <= -.1) # Only model up to 100 ms before action.
+head(uncertain.trials.modelled)
+```
+
+
+# Model #2: Guess vs Difficult
+
+Median splits
+
+```{r}
+g.medians = ggplot(uncertain.trials, aes(time, ch1, color=iv, fill=iv, linetype=iv)) +
+  stat_summary(fun.y=mean, geom='path') +
+  stat_summary(fun.data=mean_se, geom='ribbon', alpha=.2, color=NA) +
+  geom_hline(yintercept=0, linetype='dashed') +
+  geom_vline(xintercept=0, linetype='dotted') +
+  labs(x='Time to action (s)', y='Motor component (AU)', fill=NULL, color=NULL, linetype=NULL) +
+  scale_y_continuous(labels=c()) +
+  scale_color_manual(values=rep(c('black', 'red'), each=2)) +
+  scale_fill_manual(values=rep(c('black', 'red'), each=2)) +
+  scale_linetype_manual(values=rep(c('dashed', 'solid'), times=2)) +
+  theme(panel.grid.major = element_line(color='black', size=.05),
+        legend.key.width = unit(10, 'mm')) +
+  eoinR::lgnd(0, .95)
+g.medians
+```
+
+```{r fig.width=7, fig.height=3}
+
+g.medians2 = ggplot(uncertain.trials, aes(time, ch1, color=action.type, fill=action.type)) +
+  facet_wrap(~fast) +
+  stat_summary(fun.y=mean, geom='path') +
+  stat_summary(fun.data=mean_se, geom='ribbon', alpha=.2, color=NA) +
+  geom_hline(yintercept=0, linetype='dashed') +
+  geom_vline(xintercept=0, linetype='dotted') +
+  labs(x='Time to action (s)', y='Motor component (AU)', fill=NULL, color=NULL, linetype=NULL) +
+  scale_y_continuous(labels=c()) +
+  scale_color_manual(values=c('black', 'red')) +
+  scale_fill_manual(values=c('black', 'red')) +
+  theme(panel.grid.major = element_line(color='black', size=.05)) +
+  eoinR::lgnd(0, 1.)
+g.medians2
+ggsave('figures/rp_by_source_x_rt.svg', width=7, height=3)
+```
+
+## Effect of time
+
+```{r}
+g.speed = ggplot(erp.data, aes(time, ch1, color=fast, fill=fast, linetype=fast)) +
+  stat_summary(fun.y=mean, geom='path') +
+  stat_summary(fun.data=mean_se, geom='ribbon', alpha=.2) +
+  # stat_summary(fun.data=mean_se, geom='ribbon', alpha=.2, color='skyblue', fill='skyblue', linetype='solid') +
+  geom_hline(yintercept=0, linetype='dashed') +
+  geom_vline(xintercept=0, linetype='dotted') +
+  labs(x='Time to action (s)', y='Motor component (AU)', fill=NULL, color=NULL, linetype=NULL) +
+  scale_y_continuous(labels=c()) +
+  scale_linetype_manual(values=c('dashed', 'solid')) +
+  scale_color_manual(values=c("#1B9E77", "#7570B3")) +
+  scale_fill_manual(values=c("#1B9E77", "#7570B3")) +
+  theme(panel.grid.major = element_line(color='black', size=.05),
+        legend.key.width = unit(10, 'mm')) +
+  eoinR::lgnd(0, .95)
+g.speed
+```
+
+
+## Spline models
+
+Try fitting full spline models with DF between 4 and 8.
+Then, use BIC (or AIC) to decide which model to report.
+
+```{r}
+dir.create('spline.models')
+spline.degrees.of.freedom = seq(4, 8, 1) # PS: 5 is best!
+refit = F
+if(refit){
+  spline.models = map(
+    spline.degrees.of.freedom,
+    function(df) {
+      cat('\n\n\n')
+      print(paste('>>> Degrees of freedom:', df))
+      m = lmer(
+        ch1 ~ -1 + bs(time, df=df) * (is.guess * z(1/rt) + z(trial_nr)) +
+          (-1 + bs(time, 3)||participant) + (-1 + bs(time, 3)||unique.trial),
+        data=uncertain.trials.modelled,
+        control = lmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+      fn = sprintf('spline.models/guess_model_df%i.rds', df)
+      saveRDS(m, fn)
+      cat('\n\n\n')
+      return(m)
+    })
+} else {
+  spline.models = map(
+    spline.degrees.of.freedom,
+    function(df) {
+      fn = sprintf('spline.models/guess_model_df%i.rds', df)
+      readRDS(fn) %>% return()
+    })
+}
+```
+
+Model comparison
+```{r}
+bics = map_dbl(spline.models, BIC)
+plot(spline.degrees.of.freedom, bics, 'b', xlab='Degrees of freedom', ylab='BIC')
+aics = map_dbl(spline.models, AIC)
+plot(spline.degrees.of.freedom, map_dbl(spline.models, AIC), 'b', xlab='Degrees of freedom', ylab='AIC')
+```
+
+Pick the best
+
+```{r}
+m.spline = spline.models[[which.min(bics)]]
+rm(spline.models) ## Free up memory
+spline.df = spline.degrees.of.freedom[[which.min(bics)]]
+summary(m.spline)
+```
+
+
+Splines used.
+
+```{r}
+t = unique(uncertain.trials.modelled$time)
+reference.data = data.frame(Intercept=1, bs(t, df=spline.df))
+reference.data %>% mutate(t=t) %>% 
+  gather(var, val, -t) %>% ggplot(aes(t, val, color=var)) + geom_path()
+```
+
+```{r}
+Anova(m.spline, type='II')
+```
+
+
+
+```{r fig.height=5, fig.width=7}
+sort.by = 'x|#|[0-9]'
+name.updater = c('bs\\(time, df = df\\)' = 'Time#',
+                 'is.guess' = 'Source',
+                 ':' = ' x ',
+                 'z\\(trial_nr\\)' = 'Trial number',
+                 'z\\(1/rt\\)' = 'RT')
+eoinR::coefplot(m.spline, sort.by=sort.by, name.updater=name.updater)
+```
+
+
+
+```{r}
+summary(m.spline) %>% coef() %>% data.frame()
+```
+
+
+## Model comprehension - What are my parameters doing?
+
+```{r}
+sims = arm::sim(m.spline, 1000) %>% fixef()
+ivs = c('intercept', 'is.guess', 'z(1/rt)', 'is.guess:z(1/rt)')
+nice.ivs = c('Intercept', 'Source', 'Response speed', 'Source x Speed')
+names(nice.ivs) = ivs
+names(ivs) = nice.ivs
+iv.labeller = as_labeller(nice.ivs)
+```
+
+### Effect of each term on ERP
+
+```{r}
+fixef.effect.estimates = map_df(ivs, function(iv){
+  print(iv)
+  res = get.marginal.fx(uncertain.trials.modelled, sims, var.name=iv, spline.df=5)
+  res$variable = iv
+  return(res)
+})
+fixef.effect.estimates = mutate(fixef.effect.estimates,
+                                Term = fct_recode(variable, !!!ivs))
+
+ggplot(fixef.effect.estimates, aes(t, val, 
+                        color=Term, fill=Term)) +
+  facet_wrap(~Term) +
+  stat_summary(fun.y=mean, geom='path') +
+  stat_summary(fun.data=mean_sdl, geom='ribbon', alpha=.1) +
+  geom_hline(yintercept=0, linetype='dashed') +
+  theme(legend.position='none')
+```
+
+```{r}
+fixef.effect.estimates %>%
+  ggplot(aes(t, val,  color=Term, fill=Term)) +
+  stat_summary(fun.y=mean, geom='path') +
+  stat_summary(fun.data=mean_sdl, geom='ribbon', alpha=.1) +
+  geom_hline(yintercept=0, linetype='dashed') +
+  theme(legend.key.width = unit(10, 'mm'),
+        legend.position = c(0, 1), legend.justification = c(0,1)) +
+  labs(x='Time to action (s)', y='Regression weight', color='Term', fill='Term', linetype='Term')
+```
+
+### Broken down into individual basis splines
+
+```{r}
+marginal.splines = map_df(ivs, function(iv){
+  get.marginal.splines(uncertain.trials.modelled, sims, iv) %>%
+    mutate(variable = iv)
+})
+marginal.splines = mutate(marginal.splines,
+                                Term = fct_recode(variable, !!!ivs))
+
+ggplot(marginal.splines,  aes(t, val, color=basis, fill=basis, group=basis)) +
+  stat_summary(fun.y=mean, geom='path') +
+  stat_summary(fun.data = mean_sd, geom='ribbon', alpha=.2) +
+  facet_wrap(~Term) +
+  theme(legend.position='none')
+```
+
+
+### Model predictions
+
+
+```{r fig.width=7, fig.height=3}
+pred.df = get.predictions(uncertain.trials.modelled, sims, m.spline)
+g.medians.pred = ggplot(pred.df, aes(time, val, color=action.type, fill=action.type, linetype=action.type)) +
+  stat_summary(fun.y=mean, geom='path') +
+  stat_summary(fun.data=mean_sdl, geom='ribbon', alpha=.2) +
+  facet_wrap(~fast) +
+  geom_hline(yintercept=0, linetype='dashed') +
+  geom_vline(xintercept=0, linetype='dotted') +
+  labs(x='Time to action (s)', y='Motor component (AU)', fill=NULL, color=NULL, linetype=NULL) +
+  scale_y_continuous(labels=c()) +
+  scale_color_manual(values=c('black', 'red')) +
+  scale_fill_manual(values=c('black', 'red')) +
+  theme(panel.grid.major = element_line(color='black', size=.05)) +
+  eoinR::lgnd(0, 1.)
+g.medians.pred
+```
+
+```{r fig.width=7, fig.height=5}
+plot_grid(g.medians2 + labs(x='', y='') + coord_cartesian(xlim=c(-2.05, .55), ylim=c(-.3, .6)),
+          g.medians.pred + coord_cartesian(xlim=c(-2.05, .55), ylim=c(-.3, .6)),
+          align='b', ncol=1)
+```
